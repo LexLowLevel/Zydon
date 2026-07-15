@@ -1,2 +1,2 @@
 # Zydon
-Zydon is a async modern micro kernel
+Zydon is an async modern micro kernel

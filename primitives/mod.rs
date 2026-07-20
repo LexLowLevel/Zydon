@@ -1,3 +1,4 @@
+pub mod cache_padded;
 pub mod spinlock;
 pub mod async_mutex;
 pub mod wait_queue;

@@ -1,9 +1,9 @@
 // Platform types.
-// Translated from zircon/kernel/include/platform.h
+// Derived from Zircon platform.h
 
 pub const BOOT_CPU_ID: u32 = 0;
 
-/// Platform halt actions.
+/// Halt actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum HaltAction {
@@ -14,7 +14,7 @@ pub enum HaltAction {
     Shutdown,
 }
 
-/// Platform-specific, per-cpu state used to suspend/resume a CPU.
+/// Per-CPU state for suspend/resume.
 pub struct PlatformCpuResumeState {
     #[cfg(target_arch = "aarch64")]
     pub cntkctl_el1: u64,
@@ -29,15 +29,14 @@ impl Default for PlatformCpuResumeState {
     }
 }
 
-/// Whether a suspend operation is limited to the calling CPU or may power down
-/// the encapsulating power domain.
+/// Whether suspend may power down the enclosing domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformAllowDomainPowerDown {
     No,
     Yes,
 }
 
-/// Whether to halt other CPUs during a panic.
+/// Halt other CPUs during panic?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanicStartHaltOtherCpus {
     No,
@@ -81,7 +80,7 @@ pub enum PowerCpuState {
 /// CPU number type.
 pub type CpuNum = u32;
 
-// --- Platform FFI functions ---
+// FFI
 
 extern "C" {
     pub fn platform_early_init();

@@ -1,0 +1,25 @@
+[package]
+name = "zydon"
+version = "0.1.0"
+edition = "2021"
+description = "An async, high-throughput, multicore microkernel"
+license = "BSD"
+
+[lib]
+name = "zydon"
+path = "lib.rs"
+
+[dependencies]
+
+[features]
+default = []
+test = []  # Enable test-only helpers
+
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+must_use_candidate = "warn"
+missing_panics_doc = "warn"

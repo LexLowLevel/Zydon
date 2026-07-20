@@ -1,5 +1,5 @@
 // x86 idle states (C-states) for power management.
-// Translated from zircon/kernel/arch/x86/include/arch/x86/idle_states.h
+// Derived from Zircon idle_states.h
 // Every processor must support at least C1.
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -8,18 +8,18 @@ use crate::variables::bits::bits_shift;
 
 pub const X86_MAX_CSTATES: usize = 12;
 
-// C1 constants
+// C1
 
-/// C1 is the shallowest idle state, always supported.
+/// Shallowest idle state (always supported).
 pub const X86_CSTATE_C1_NAME: &str = "C1";
 pub const X86_CSTATE_C1_MWAIT_HINT: u32 = 0x00;
 
 /// Only allow C1.
 pub const K_X86_IDLE_STATE_MASK_C1_ONLY: u32 = 0x1;
 
-// Raw idle state data (from hardware config)
+// Raw idle state data
 
-/// A single idle state definition.
+/// Idle state definition.
 #[derive(Debug, Clone, Copy)]
 pub struct X86IdleStateRaw {
     pub name: &'static str,
@@ -28,7 +28,7 @@ pub struct X86IdleStateRaw {
     pub flushes_tlb: bool,
 }
 
-/// Construct a C1 idle state with the given exit latency.
+/// Construct C1 with given exit latency.
 pub const fn c1(exit_latency_us: u32) -> X86IdleStateRaw {
     X86IdleStateRaw {
         name: X86_CSTATE_C1_NAME,
@@ -38,13 +38,12 @@ pub const fn c1(exit_latency_us: u32) -> X86IdleStateRaw {
     }
 }
 
-/// List of idle states supported by the system.
-/// Sorted by descending latency. Must end with C1.
+/// Idle state list (descending latency, must end with C1).
 #[derive(Debug, Clone)]
 pub struct X86IdleStatesConfig {
     pub states: [X86IdleStateRaw; X86_MAX_CSTATES],
-    /// Bitmask of allowed MWAIT hints. Bit x = MWAIT(Cx+1).
-    /// Always allows C1 (bit 0 is ignored). Overridable via `k idlestates setmask`.
+    /// Allowed MWAIT hint bitmask. Bit x = MWAIT(Cx+1).
+    /// C1 always allowed (bit 0 ignored). Overridable via `k idlestates setmask`.
     pub default_state_mask: u32,
 }
 
@@ -62,13 +61,12 @@ impl Default for X86IdleStatesConfig {
     }
 }
 
-/// Returns true if the state is the base C1 idle state.
+/// Check if state is base C1.
 pub fn x86_is_base_idle_state(state: &X86IdleStateRaw) -> bool {
     state.mwait_hint == X86_CSTATE_C1_MWAIT_HINT
 }
 
-/// Returns the number of states in `states`.
-/// If `states` is invalid (i.e. does not contain X86_CSTATE_C1), returns None.
+/// Count states in config. Returns None if no C1 found.
 pub fn x86_num_idle_states(states: &X86IdleStatesConfig) -> Option<usize> {
     for num in 0..X86_MAX_CSTATES {
         if x86_is_base_idle_state(&states.states[num]) {
@@ -78,9 +76,9 @@ pub fn x86_num_idle_states(states: &X86IdleStatesConfig) -> Option<usize> {
     None
 }
 
-// Runtime idle state (with counters)
+// Runtime state
 
-/// Single idle state with runtime tracking.
+/// Idle state with runtime counters.
 #[derive(Debug, Clone)]
 pub struct X86IdleState {
     state: X86IdleStateRaw,
@@ -140,7 +138,7 @@ impl X86IdleState {
     }
 }
 
-// Runtime idle states manager
+// Runtime manager
 
 const IDLE_DURATION_FACTOR: u32 = 3;
 
@@ -148,7 +146,7 @@ fn state_number_from_mwait_hint(hint: u32) -> u32 {
     bits_shift(hint, 8, 4) + 1
 }
 
-/// Manages idle states for a CPU and picks the best state to enter.
+/// Per-CPU idle state manager and selector.
 #[derive(Debug)]
 pub struct X86IdleStates {
     states: [Option<X86IdleState>; X86_MAX_CSTATES],
@@ -158,7 +156,7 @@ pub struct X86IdleStates {
 }
 
 impl X86IdleStates {
-    /// Construct from hardware configuration.
+    /// Construct from HW config.
     pub fn new(config: &X86IdleStatesConfig) -> Self {
         let num_states = x86_num_idle_states(config)
             .expect("Invalid C-state configuration: Expected at least C1 to be defined.");
@@ -191,17 +189,16 @@ impl X86IdleStates {
         self.num_states
     }
 
-    /// Pick an idle state. Returns the deepest valid state whose exit
-    /// latency is less than IDLE_DURATION_FACTOR * last_idle_duration.
+    /// Pick deepest valid state whose exit latency < IDLE_DURATION_FACTOR × last_idle_duration.
     pub fn pick_idle_state(&mut self) -> Option<&mut X86IdleState> {
         if self.last_idle_duration == 0 {
-            // No history, use shallowest state (C1).
+            // No history; use C1.
             return self.states[self.num_states - 1].as_mut();
         }
 
         let valid_state_mask = self.state_mask.load(Ordering::Relaxed);
 
-        // Pick the deepest valid state with acceptable exit latency.
+        // Select deepest valid state with acceptable latency.
         for i in 0..self.num_states {
             if let Some(ref state) = self.states[i] {
                 let state_num = state_number_from_mwait_hint(state.mwait_hint());
@@ -217,12 +214,12 @@ impl X86IdleStates {
         self.states[self.num_states - 1].as_mut()
     }
 
-    /// Record the actual idle duration for future state selection.
+    /// Record idle duration for future selection.
     pub fn record_duration(&mut self, duration: ZxDuration) {
         self.last_idle_duration = duration;
     }
 
-    /// Update the mask of valid C-states.
+    /// Update valid C-state mask.
     pub fn set_state_mask(&self, mask: u32) {
         self.state_mask.store(mask | 0x1, Ordering::Relaxed);
     }

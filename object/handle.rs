@@ -1,15 +1,15 @@
 // Handle table.
 //
-// Per-process mapping from handle IDs to kernel object references.
-// Uses generational indices to detect use-after-close.
+// Per-process generational-index mapping from handle IDs to kernel objects.
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::primitives::spinlock::Spinlock;
 use crate::object::kernel_object::KoRef;
 use crate::object::rights::Rights;
 
-/// Handle value passed to userspace. Upper 32 = generation, lower 32 = index.
+/// Handle passed to userspace. Upper 32 = generation, lower 32 = index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Handle(u64);
 
@@ -36,7 +36,7 @@ impl Handle {
 struct Slot {
     generation: AtomicU32,
     entry: Option<HandleEntry>,
-    /// Index of the next free slot, or None if this is the tail of the free list.
+    /// Next free slot index, or None if tail of free list.
     next_free: Option<usize>,
 }
 
@@ -45,7 +45,7 @@ struct HandleEntry {
     rights: Rights,
 }
 
-/// Per-process handle table. Uses a generational-index array with free list.
+/// Per-process handle table. Generational-index array with free list.
 pub struct HandleTable {
     slots: Spinlock<HandleTableInner>,
 }
@@ -78,13 +78,12 @@ impl HandleTable {
         }
     }
 
-    /// Create a new handle. Returns Err if table is full.
+    /// Create a handle. Returns Err if table is full.
     pub fn create(&self, ko_ref: KoRef, rights: Rights) -> Result<Handle, HandleError> {
         let mut inner = self.slots.lock();
 
-        let idx = inner.free_head.ok_or(HandleError::TableFull)?;
-
-        // Pop from free list using the stored next_free pointer.
+        let capacity = inner.slots.len();
+        let idx = inner.free_head.ok_or(HandleError::TableFull { capacity })?;
         let slot = inner.slots[idx].as_mut().unwrap();
         inner.free_head = slot.next_free;
         slot.next_free = None;
@@ -113,8 +112,7 @@ impl HandleTable {
         Some((entry.ko_ref.clone(), entry.rights))
     }
 
-    /// Duplicate a handle with rights downgrade (monotonic lossy).
-    /// Returns Err if source is invalid or lacks DUPLICATE right.
+    /// Duplicate a handle with rights downgrade.
     pub fn duplicate(
         &self,
         handle: Handle,
@@ -127,27 +125,27 @@ impl HandleTable {
         let slot = inner.slots.get(idx).and_then(|s| s.as_ref());
         let slot = match slot {
             Some(s) => s,
-            None => return Err(HandleError::InvalidHandle),
+            None => return Err(HandleError::InvalidHandle { handle, current_gen: None }),
         };
 
         let current_gen = slot.generation.load(Ordering::Acquire);
         if current_gen != gen {
-            return Err(HandleError::InvalidHandle);
+            return Err(HandleError::InvalidHandle { handle, current_gen: Some(current_gen) });
         }
 
         let entry = match &slot.entry {
             Some(e) => e,
-            None => return Err(HandleError::InvalidHandle),
+            None => return Err(HandleError::InvalidHandle { handle, current_gen: Some(current_gen) }),
         };
 
         if !entry.rights.contains(Rights::DUPLICATE) {
-            return Err(HandleError::AccessDenied);
+            return Err(HandleError::AccessDenied { handle, missing: Rights::DUPLICATE });
         }
 
         let effective_rights = entry.rights.downgrade(new_rights);
 
-        // Allocate a new slot.
-        let new_idx = inner.free_head.ok_or(HandleError::TableFull)?;
+        let capacity = inner.slots.len();
+        let new_idx = inner.free_head.ok_or(HandleError::TableFull { capacity })?;
         let new_slot = inner.slots[new_idx].as_mut().unwrap();
         inner.free_head = new_slot.next_free;
         new_slot.next_free = None;
@@ -163,7 +161,7 @@ impl HandleTable {
         Ok(Handle(((new_gen as u64) << 32) | (new_idx as u64)))
     }
 
-    /// Close a handle. Returns Err if invalid or generation mismatch.
+    /// Close a handle.
     pub fn close(&self, handle: Handle) -> Result<(), HandleError> {
         let mut inner = self.slots.lock();
         let idx = handle.index();
@@ -172,20 +170,17 @@ impl HandleTable {
         let slot = inner.slots.get_mut(idx).and_then(|s| s.as_mut());
         let slot = match slot {
             Some(s) => s,
-            None => return Err(HandleError::InvalidHandle),
+            None => return Err(HandleError::InvalidHandle { handle, current_gen: None }),
         };
 
         let current_gen = slot.generation.load(Ordering::Acquire);
         if current_gen != gen {
-            return Err(HandleError::InvalidHandle);
+            return Err(HandleError::InvalidHandle { handle, current_gen: Some(current_gen) });
         }
 
         if slot.entry.take().is_some() {
-            // Bump generation to invalidate stale handles.
             slot.generation.fetch_add(1, Ordering::Release);
             inner.count -= 1;
-
-            // Link into the head of the free list.
             slot.next_free = inner.free_head;
             inner.free_head = Some(idx);
         }
@@ -200,7 +195,6 @@ impl HandleTable {
         handle: Handle,
         dest: &HandleTable,
     ) -> Result<Handle, HandleError> {
-        // Lock both tables. Lower address first to avoid deadlock.
         let (first, second) = if (self as *const _) < (dest as *const _) {
             (self, dest)
         } else {
@@ -216,32 +210,29 @@ impl HandleTable {
         let slot = first_inner.slots.get(idx).and_then(|s| s.as_ref());
         let slot = match slot {
             Some(s) => s,
-            None => return Err(HandleError::InvalidHandle),
+            None => return Err(HandleError::InvalidHandle { handle, current_gen: None }),
         };
 
         let current_gen = slot.generation.load(Ordering::Acquire);
         if current_gen != gen {
-            return Err(HandleError::InvalidHandle);
+            return Err(HandleError::InvalidHandle { handle, current_gen: Some(current_gen) });
         }
 
         let entry = match &slot.entry {
             Some(e) => e,
-            None => return Err(HandleError::InvalidHandle),
+            None => return Err(HandleError::InvalidHandle { handle, current_gen: Some(current_gen) }),
         };
 
         if !entry.rights.contains(Rights::TRANSFER) {
-            return Err(HandleError::AccessDenied);
+            return Err(HandleError::AccessDenied { handle, missing: Rights::TRANSFER });
         }
 
-        // Move entry to destination.
         let rights = entry.rights;
         let ko_ref = entry.ko_ref.clone();
-
-        // Close in source (we already hold both locks).
         let source_idx = idx;
 
-        // Allocate in destination.
-        let dest_idx = second_inner.free_head.ok_or(HandleError::TableFull)?;
+        let capacity = second_inner.slots.len();
+        let dest_idx = second_inner.free_head.ok_or(HandleError::TableFull { capacity })?;
         let dest_slot = second_inner.slots[dest_idx].as_mut().unwrap();
         second_inner.free_head = dest_slot.next_free;
         dest_slot.next_free = None;
@@ -251,12 +242,10 @@ impl HandleTable {
         dest_slot.entry = Some(HandleEntry { ko_ref, rights });
         second_inner.count += 1;
 
-        // Now close in source.
         let source_slot = first_inner.slots[source_idx].as_mut().unwrap();
         source_slot.entry = None;
         source_slot.generation.fetch_add(1, Ordering::Release);
         first_inner.count -= 1;
-        // Link freed source slot into its free list.
         source_slot.next_free = first_inner.free_head;
         first_inner.free_head = Some(source_idx);
 
@@ -270,7 +259,7 @@ impl HandleTable {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleError {
-    InvalidHandle,
-    AccessDenied,
-    TableFull,
+    InvalidHandle { handle: Handle, current_gen: Option<u32> },
+    AccessDenied { handle: Handle, missing: Rights },
+    TableFull { capacity: usize },
 }

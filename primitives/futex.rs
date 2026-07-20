@@ -148,27 +148,22 @@ impl<'a> Future for FutexWaitFuture<'a> {
             self.wait_node.set_priority(0);
 
             let _guard = bucket._lock.lock();
-            // SAFETY: wait_node lives in this future, which is pinned.
             unsafe {
                 bucket.queue.enqueue(&mut self.wait_node);
             }
             self.registered = true;
 
-            // TODO: arm a timer wheel entry for the timeout.
-
             return Poll::Pending;
         }
 
-        // Check if we were woken.
+        let _guard = bucket._lock.lock();
         if !self.wait_node.is_linked() {
             self.registered = false;
             return Poll::Ready(FutexResult::Woken);
         }
 
-        // Check timeout.
-        // TODO: integrate with timer wheel.
-        // A real implementation would compare against the armed timer.
-
+        self.wait_node.set_waker(cx.waker().clone());
+        drop(_guard);
         Poll::Pending
     }
 }

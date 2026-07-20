@@ -1,8 +1,8 @@
 // IPC message.
 //
-// Fixed header + inline payload (up to 256 bytes) + handle array.
-// Designed to fit in a single cache line for small control messages.
-// Larger payloads use zero-copy VMO path.
+// Fixed header + inline payload (≤256B) + handle array.
+// Fits in one cache line for small control messages.
+// Large payloads use zero-copy VMO path.
 
 use core::fmt;
 
@@ -21,7 +21,7 @@ pub mod flags {
     pub const IS_REPLY: u16 = 1 << 3;     // this is a reply message
 }
 
-/// Message header. Fixed layout for ABI stability.
+/// Fixed layout for ABI stability.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MessageHeader {
@@ -62,7 +62,7 @@ impl fmt::Debug for MessageHeader {
     }
 }
 
-/// A kernel IPC message. Owns its inline payload and handles.
+/// Kernel IPC message with inline payload and handles.
 pub struct Message {
     pub header: MessageHeader,
     payload: [u8; MAX_INLINE_PAYLOAD],
@@ -70,7 +70,7 @@ pub struct Message {
 }
 
 impl Message {
-    /// Create a message with inline payload.
+    /// Construct with inline payload.
     pub fn new_inline(
         sender: crate::task::task_id::TaskId,
         tx_id: u64,
@@ -103,8 +103,7 @@ impl Message {
         })
     }
 
-    /// Create a zero-copy message referencing a VMO region.
-    /// The receiver maps the VMO instead of copying.
+    /// Construct with VMO reference for zero-copy.
     pub fn new_zero_copy(
         sender: crate::task::task_id::TaskId,
         tx_id: u64,
@@ -117,7 +116,7 @@ impl Message {
             return Err(MessageError::TooManyHandles);
         }
 
-        // Encode VMO reference as inline payload: [handle: u64][offset: u64][size: u64]
+        // Encode VMO reference: [handle: u64][offset: u64][size: u64]
         let mut payload = [0u8; MAX_INLINE_PAYLOAD];
         let vmo_ref = VmoReference {
             handle: vmo_handle.to_raw(),
@@ -159,7 +158,7 @@ impl Message {
         &self.handles[..self.header.num_handles as usize]
     }
 
-    /// Take handles out of the message (for transfer to receiver).
+    /// Transfer handles out of the message (for receiver).
     pub fn take_handles(&mut self) -> heapless::Vec<Handle, MAX_HANDLES> {
         let mut result = heapless::Vec::new();
         for i in 0..self.header.num_handles as usize {
@@ -174,7 +173,7 @@ impl Message {
         (self.header.flags & flags::ZERO_COPY_VMO) != 0
     }
 
-    /// Extract the VMO reference from a zero-copy message.
+    /// Extract VMO reference from a zero-copy message.
     pub fn vmo_reference(&self) -> Option<VmoReference> {
         if !self.is_zero_copy() {
             return None;
@@ -188,7 +187,7 @@ impl Message {
     }
 }
 
-/// Reference to a VMO region for zero-copy transfer.
+/// VMO region reference for zero-copy transfer.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct VmoReference {
@@ -203,7 +202,7 @@ pub enum MessageError {
     TooManyHandles,
 }
 
-// heapless Vec (reused from wait_queue)
+// heapless Vec (see wait_queue)
 mod heapless {
     pub struct Vec<T, const N: usize> {
         buf: [core::mem::MaybeUninit<T>; N],
@@ -213,7 +212,7 @@ mod heapless {
     impl<T, const N: usize> Vec<T, N> {
         pub fn new() -> Self {
             Self {
-                buf: unsafe { core::mem::MaybeUninit::uninit().assume_init() },
+                buf: [const { core::mem::MaybeUninit::uninit() }; N],
                 len: 0,
             }
         }

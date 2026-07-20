@@ -1,8 +1,5 @@
 // Broadcast channel.
-//
-// Single-producer, multi-consumer. Each send() wakes all parked receivers
-// with the same value. Uses a generation counter so receivers can tell
-// when a new value has arrived.
+// SPMC, each send wakes all parked receivers with the same value.
 
 use core::cell::UnsafeCell;
 use core::future::Future;
@@ -81,10 +78,8 @@ impl<T: Clone> Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let inner = self.inner();
-        // Signal closure.
         inner.generation.store(u64::MAX, Ordering::Release);
         inner.waiters.wake_all();
-        // Release refcount.
         unsafe {
             if (*self.ptr).refcount.fetch_sub(1, Ordering::Release) == 1 {
                 drop(Box::from_raw(self.ptr));
@@ -109,7 +104,7 @@ impl<T> Receiver<T> {
 }
 
 impl<T: Clone> Receiver<T> {
-    /// Subscribe a new receiver starting at the current generation.
+    /// Subscribe a new receiver at the current generation.
     pub fn subscribe(&self) -> Receiver<T> {
         let inner = self.inner();
         // SAFETY: ptr is valid; refcount ensures it stays alive.

@@ -1,7 +1,9 @@
-// Per-core async executor. Each core runs one of these.
-// Pulls tasks from a local deque, steals from other cores when idle,
-// and enters a low-power state when there's nothing to do.
+// Per-core async executor.
+//
+// Polls tasks from a local Chase-Lev deque, steals from peers when idle,
+// and enters a low-power C-state when quiescent.
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
@@ -13,11 +15,11 @@ use crate::task::stealer::{self, Worker, Stealer};
 
 pub struct Executor {
     core_id: u32,
-    /// LIFO end of the work-stealing deque.
+    /// LIFO end of the local deque.
     worker: Worker<*const TaskControlBlock>,
-    /// Stealers from other cores (indexed by core_id).
+    /// Remote stealers (indexed by core_id).
     stealers: Vec<Stealer<*const TaskControlBlock>>,
-    /// Incoming tasks from interrupt handlers on this core.
+    /// Priority-aware run queue from interrupt handlers.
     run_queue: RunQueue,
     default_quantum: i32,
     should_halt: AtomicBool,
@@ -51,12 +53,12 @@ impl Executor {
         }
     }
 
-    /// Push a task into this core's run queue (called by wakers).
+    /// Enqueue a task (called by wakers).
     pub fn enqueue_task(&self, task: &TaskControlBlock) {
         self.run_queue.enqueue(task);
     }
 
-    /// Main loop. Runs forever until `should_halt` is set.
+    /// Main scheduling loop. Runs until `should_halt`.
     pub fn run(&mut self) -> ! {
         loop {
             if self.should_halt.load(Ordering::Acquire) {
@@ -86,10 +88,10 @@ impl Executor {
         }
     }
 
-    /// Poll a single task. Handles state transitions and quantum expiry.
+    /// Poll one task, handling state transitions and quantum expiry.
     fn poll_task(&mut self, task: &TaskControlBlock) {
         if task.state.transition(TaskState::Ready, TaskState::Running).is_err() {
-            // Already moved by a concurrent wake, skip it.
+            // Concurrent wake moved it; skip.
             return;
         }
 
@@ -98,15 +100,14 @@ impl Executor {
         let waker = self.make_waker(task);
 
         loop {
-            // SAFETY: task is RUNNING, so we have exclusive access to its future.
+            // SAFETY: RUNNING state grants exclusive future access.
             let future = unsafe { task.future_mut() };
             let cx_ref = &mut Context::from_waker(&waker);
 
             match future.as_mut().poll(cx_ref) {
                 Poll::Ready(()) => {
-                    // Task finished.
-                    task.state.transition(TaskState::Running, TaskState::Dying)
-                        .expect("invalid transition Running->Dying");
+                    let _ = task.state.transition(TaskState::Running, TaskState::Dying);
+                    debug_assert!(task.state.get() == TaskState::Dying);
                     unsafe { task.state.set(TaskState::Dead); }
                     task.current_core.store(u32::MAX, Ordering::Relaxed);
                     self.tasks_completed += 1;
@@ -117,20 +118,15 @@ impl Executor {
                     self.polls_executed += 1;
                     let remaining = task.consume_tick();
                     if remaining <= 0 {
-                        // Quantum expired. If the task didn't park itself,
-                        // force it back to READY and re-enqueue.
                         let state = task.state.get();
                         if state == TaskState::Running {
-                            task.state.transition(TaskState::Running, TaskState::Ready)
-                                .expect("invalid transition");
+                            let _ = task.state.transition(TaskState::Running, TaskState::Ready);
                             task.current_core.store(u32::MAX, Ordering::Relaxed);
                             self.worker.push(task as *const _);
                         } else {
-                            // Already parked on a wait queue, will be re-enqueued on wake.
                             task.current_core.store(u32::MAX, Ordering::Relaxed);
                         }
 
-                        // Priority decay for burning through a full quantum.
                         let decay = task.decay_counter.fetch_add(1, Ordering::Relaxed) + 1;
                         if decay % 4 == 0 {
                             let eff = task.effective_priority.load(Ordering::Relaxed);
@@ -141,13 +137,12 @@ impl Executor {
                         }
                         return;
                     }
-                    // Still have quantum left, poll again.
                 }
             }
         }
     }
 
-    /// Try to steal work from a random victim core.
+    /// Steal work from a random victim.
     fn try_steal(&mut self) -> bool {
         if self.stealers.is_empty() {
             return false;
@@ -176,7 +171,7 @@ impl Executor {
     }
 
     fn pick_victim(&self) -> usize {
-        // xorshift32 PRNG, seeded from poll count.
+        // xorshift32 PRNG from poll count.
         let mut seed = (self.polls_executed as u32).wrapping_mul(1664525).wrapping_add(1013904223);
         seed ^= seed << 13;
         seed ^= seed >> 17;
@@ -184,24 +179,24 @@ impl Executor {
         (seed as usize) % self.stealers.len()
     }
 
-    /// Run deferred work (softirq, timers, etc.).
-    /// TODO: check softirq bitmap and timer wheel here.
+    /// Deferred work (softirq, timers).
+    /// TODO: check softirq bitmap and timer wheel.
     fn run_pending_work(&mut self) {
     }
 
-    /// Enter the deepest valid C-state until the next interrupt.
+    /// Enter deepest valid C-state until next interrupt.
     fn idle_enter(&mut self) {
         self.idle_cycles += 1;
 
         #[cfg(target_arch = "x86_64")]
         {
-            // SAFETY: HLT in ring 0, resumes on next interrupt.
+            // SAFETY: ring-0 HLT, resumes on interrupt.
             unsafe { core::arch::asm!("sti; hlt"); }
         }
 
         #[cfg(target_arch = "aarch64")]
         {
-            // SAFETY: WFI at EL1.
+            // SAFETY: EL1 WFI.
             unsafe { core::arch::asm!("wfi"); }
         }
 
@@ -211,9 +206,9 @@ impl Executor {
         }
     }
 
-    /// Halt this core. No return.
+    /// Halt this core (no return).
     fn shutdown(&self) -> ! {
-        // TODO: migrate tasks to other cores, flush caches, ack the halt IPI.
+        // TODO: migrate tasks, flush caches, ack halt IPI.
         loop {
             #[cfg(target_arch = "x86_64")]
             unsafe { core::arch::asm!("cli; hlt"); }
@@ -224,16 +219,15 @@ impl Executor {
         }
     }
 
-    /// Create a Waker for a task. The waker transitions the task
-    /// from BLOCKED to READY and enqueues it on wake.
+    /// Create a Waker that transitions BLOCKED→READY on wake.
     fn make_waker(&self, task: &TaskControlBlock) -> Waker {
+        task.waker_refcount.fetch_add(1, Ordering::Relaxed);
         let data = task as *const TaskControlBlock as *const ();
         unsafe { Waker::from_raw(RawWaker::new(data, &WAKER_VTABLE)) }
     }
 }
 
-// Waker vtable. Stores a raw pointer to the TCB.
-// On wake(), the task goes BLOCKED -> READY and gets enqueued.
+// Waker vtable. TCB's waker_refcount ensures TCB outlives all Wakers.
 const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     waker_clone,
     waker_wake,
@@ -242,12 +236,15 @@ const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 unsafe fn waker_clone(data: *const ()) -> RawWaker {
+    let task = &*(data as *const TaskControlBlock);
+    task.waker_refcount.fetch_add(1, Ordering::Relaxed);
     RawWaker::new(data, &WAKER_VTABLE)
 }
 
 unsafe fn waker_wake(data: *const ()) {
     let task = &*(data as *const TaskControlBlock);
     task.wake();
+    task.waker_refcount.fetch_sub(1, Ordering::Release);
 }
 
 unsafe fn waker_wake_by_ref(data: *const ()) {
@@ -255,11 +252,12 @@ unsafe fn waker_wake_by_ref(data: *const ()) {
     task.wake();
 }
 
-unsafe fn waker_drop(_data: *const ()) {
-    // no-op, the TCB isn't owned by the waker
+unsafe fn waker_drop(data: *const ()) {
+    let task = &*(data as *const TaskControlBlock);
+    task.waker_refcount.fetch_sub(1, Ordering::Release);
 }
 
-/// Bootstrap an executor on the current core and run it forever.
+/// Bootstrap an executor on the current core.
 pub fn bootstrap_executor(
     core_id: u32,
     worker: Worker<*const TaskControlBlock>,

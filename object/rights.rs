@@ -1,12 +1,9 @@
-// Capability rights.
-//
-// Every handle carries a set of rights that authorize specific operations.
-// Rights are monotonically lossy: duplicated handles can only have fewer
-// rights, never more.
+// Capability rights bitflags.
+// Rights are monotonically lossy on handle duplication.
 
 use core::fmt;
 
-/// Capability rights bitflags. Each right authorizes a class of operations.
+/// Capability rights bitflags.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rights(u32);
 
@@ -36,12 +33,12 @@ impl Rights {
         self.0
     }
 
-    /// Does self contain all of other?
+    /// Contains all of other?
     pub const fn contains(&self, other: Rights) -> bool {
         (self.0 & other.0) == other.0
     }
 
-    /// Does self contain any of other?
+    /// Contains any of other?
     pub const fn intersects(&self, other: Rights) -> bool {
         (self.0 & other.0) != 0
     }
@@ -61,7 +58,7 @@ impl Rights {
         Rights(self.0 & !other.0)
     }
 
-    /// Downgrade: intersection with allowed. For monotonic lossy transfer.
+    /// Downgrade: intersect with allowed rights.
     pub const fn downgrade(&self, allowed: Rights) -> Rights {
         self.intersection(allowed)
     }

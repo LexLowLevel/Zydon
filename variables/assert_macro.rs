@@ -1,9 +1,9 @@
 // Assert macros.
-// See build argument |assert_level| for which are enabled at which debug levels.
+// Enabled at debug levels controlled by |assert_level| build arg.
 
 use core::panic::Location;
 
-/// Panic with file, line, and expression on assert failure.
+/// Assert failure panic (file, line, expr).
 #[cold]
 #[inline(never)]
 #[track_caller]
@@ -11,7 +11,7 @@ pub fn assert_fail(file: &str, line: u32, expression: &str) -> ! {
     panic!("assertion failed at {}:{}: {}", file, line, expression);
 }
 
-/// Panic with file, line, expression, and custom message.
+/// Assert failure panic with message.
 #[cold]
 #[inline(never)]
 #[track_caller]
@@ -19,7 +19,7 @@ pub fn assert_fail_msg(file: &str, line: u32, expression: &str, msg: &str) -> ! 
     panic!("assertion failed at {}:{}: {}\n{}", file, line, expression, msg);
 }
 
-/// Assert that x is true. Always enabled.
+/// Always-on assert.
 #[macro_export]
 macro_rules! zydon_assert {
     ($cond:expr) => {
@@ -29,7 +29,7 @@ macro_rules! zydon_assert {
     };
 }
 
-/// Assert with custom message. Always enabled.
+/// Always-on assert with message.
 #[macro_export]
 macro_rules! zydon_assert_msg {
     ($cond:expr, $($arg:tt)*) => {
@@ -41,7 +41,7 @@ macro_rules! zydon_assert_msg {
     };
 }
 
-/// Debug assert. Only enabled in debug builds.
+/// Debug-only assert.
 #[macro_export]
 macro_rules! zydon_debug_assert {
     ($cond:expr) => {
@@ -54,7 +54,7 @@ macro_rules! zydon_debug_assert {
     };
 }
 
-/// Debug assert with custom message. Only enabled in debug builds.
+/// Debug-only assert with message.
 #[macro_export]
 macro_rules! zydon_debug_assert_msg {
     ($cond:expr, $($arg:tt)*) => {
@@ -69,7 +69,7 @@ macro_rules! zydon_debug_assert_msg {
     };
 }
 
-/// Unconditional panic.
+/// Unconditional panic macro.
 #[macro_export]
 macro_rules! zydon_panic {
     ($($arg:tt)*) => {
@@ -77,7 +77,7 @@ macro_rules! zydon_panic {
     };
 }
 
-/// Conditional debug assert (body only emitted in debug builds).
+/// Debug-only assert (body gated).
 #[macro_export]
 macro_rules! zydon_debug_assert_cond {
     ($cond:expr) => {
@@ -88,7 +88,7 @@ macro_rules! zydon_debug_assert_cond {
     };
 }
 
-/// Conditional debug assert with message (body only emitted in debug builds).
+/// Debug-only assert with message (body gated).
 #[macro_export]
 macro_rules! zydon_debug_assert_msg_cond {
     ($cond:expr, $($arg:tt)*) => {

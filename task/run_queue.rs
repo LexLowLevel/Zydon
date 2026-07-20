@@ -1,28 +1,24 @@
 // Per-core multilevel feedback run queue.
 //
-// 32 priority levels, each backed by a lock-free MPSC queue.
-// Dequeue uses leading_zeros() on a bitmap to find the highest
-// non-empty level in O(1).
-//
-// Priority decays when a task burns through its full quantum without
-// blocking, and recovers when it yields to I/O. This favors I/O-bound tasks.
+// 32 priority levels backed by lock-free MPSC queues.
+// Bitmap + leading_zeros() for O(1) dequeue of highest-priority task.
+// Priority decays on full-quantum burn, recovers on I/O yield.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::primitives::spinlock::Spinlock;
 use crate::task::task_control_block::TaskControlBlock;
 
-/// Number of priority levels. Higher index = higher priority.
+/// Number of priority levels (higher index = higher priority).
 const NUM_LEVELS: usize = 32;
 
 type OccupancyBitmap = u32;
 
-/// Per-core run queue with 32 priority levels.
+/// Per-core run queue. 32 levels, each an intrusive MPSC behind a spinlock.
 pub struct RunQueue {
-    /// Each level is an intrusive MPSC queue behind a spinlock.
-    /// Contention is minimal since it's per-core.
+    /// Intrusive MPSC queues (minimal contention: per-core).
     levels: [Spinlock<LevelQueue>; NUM_LEVELS],
-    occupancy: AtomicU32, // bit N set if level N is non-empty
+    occupancy: AtomicU32, // bit N set if level N non-empty
     len: AtomicU32,
 }
 
@@ -32,7 +28,7 @@ struct LevelQueue {
     count: u32,
 }
 
-// SAFETY: LevelQueue is only accessed through the Spinlock in RunQueue.
+// SAFETY: LevelQueue only accessed through RunQueue's Spinlock.
 unsafe impl Send for LevelQueue {}
 unsafe impl Sync for LevelQueue {}
 
@@ -45,11 +41,12 @@ impl LevelQueue {
         }
     }
 
+    #[inline]
     fn is_empty(&self) -> bool {
         self.count == 0
     }
 
-    /// Push a task to the tail. SAFETY: task must remain valid until popped.
+    /// Push to tail. SAFETY: task valid until popped.
     unsafe fn push(&mut self, task: *const TaskControlBlock) {
         *(*task).run_queue_next.get() = core::ptr::null();
         if self.tail.is_null() {
@@ -63,7 +60,7 @@ impl LevelQueue {
         self.count += 1;
     }
 
-    /// Pop a task from the head.
+    /// Pop from head.
     unsafe fn pop(&mut self) -> Option<*const TaskControlBlock> {
         if self.head.is_null() {
             return None;
@@ -82,27 +79,19 @@ impl LevelQueue {
 
 impl RunQueue {
     pub fn new() -> Self {
-        macro_rules! init_levels {
-            ($($i:expr),*) => {
-                [$(Spinlock::new(LevelQueue::new()),)*]
-            };
-        }
         Self {
-            levels: init_levels!(
-                0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
-                16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
-            ),
+            levels: core::array::from_fn(|_| Spinlock::new(LevelQueue::new())),
             occupancy: AtomicU32::new(0),
             len: AtomicU32::new(0),
         }
     }
 
-    /// Enqueue a task at its effective priority level.
+    /// Enqueue at effective priority level.
     pub fn enqueue(&self, task: &TaskControlBlock) {
         let priority = task.effective_priority.load(Ordering::Relaxed);
         let level = Self::priority_to_level(priority);
 
-        // SAFETY: task is ref-counted and outlives its time in the queue.
+        // SAFETY: task is ref-counted, outlives queue residence.
         unsafe {
             self.levels[level].lock().push(task as *const _);
         }
@@ -111,43 +100,40 @@ impl RunQueue {
         self.len.fetch_add(1, Ordering::Release);
     }
 
-    /// Dequeue the highest-priority task.
+    /// Dequeue highest-priority task.
     pub fn dequeue(&self) -> Option<*const TaskControlBlock> {
-        let bitmap = self.occupancy.load(Ordering::Acquire);
-        if bitmap == 0 {
-            return None;
-        }
-
-        // Find highest set bit.
-        let level = 31 - bitmap.leading_zeros() as usize;
-
-        let task = unsafe { self.levels[level].lock().pop() };
-
-        if let Some(t) = task {
-            // Check if the level is now empty.
-            if self.levels[level].lock().is_empty() {
-                self.occupancy.fetch_and(!(1u32 << level), Ordering::Release);
+        loop {
+            let bitmap = self.occupancy.load(Ordering::Acquire);
+            if bitmap == 0 {
+                return None;
             }
-            self.len.fetch_sub(1, Ordering::Release);
-            Some(t)
-        } else {
-            // Race: level was drained between bitmap read and lock. Retry.
-            self.dequeue()
+
+            let level = 31 - bitmap.leading_zeros() as usize;
+
+            let task = unsafe { self.levels[level].lock().pop() };
+
+            if let Some(t) = task {
+                if self.levels[level].lock().is_empty() {
+                    self.occupancy.fetch_and(!(1u32 << level), Ordering::Release);
+                }
+                self.len.fetch_sub(1, Ordering::Release);
+                return Some(t);
+            }
         }
     }
 
-    /// Returns the total number of tasks in the queue.
+    /// Total tasks enqueued.
     pub fn len(&self) -> u32 {
         self.len.load(Ordering::Relaxed)
     }
 
-    /// Returns true if the queue is empty.
+    /// True if empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Convert signed priority to level index [0, 31].
-    /// Priority 0 maps to level 15 (neutral).
+    /// Signed priority → level index [0, 31]. 0 maps to 15.
+    #[inline]
     fn priority_to_level(priority: i32) -> usize {
         let clamped = priority.max(-16).min(15);
         (clamped + 16) as usize

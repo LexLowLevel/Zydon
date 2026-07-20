@@ -1,36 +1,33 @@
 // Time types and arithmetic.
-// Translated from zircon/kernel/include/zircon/time.h
-//
-// Types: zx_<kind>_<timeline>_[units_]t
-//   kind: "instant" (point) or "duration"
-//   timeline: "mono" or "boot"
-//   units: "ticks" or nanoseconds (default)
+// Derived from Zircon time.h
+// Naming: zx_<kind>_<timeline>_[units_]t
+//   kind: instant | duration; timeline: mono | boot; units: ticks | ns (default)
 
-// Monomorphic types (specific timeline)
+// Monomorphic types
 
-/// Point in time on monotonic timeline (nanoseconds).
+/// Monotonic time point (ns).
 pub type ZxInstantMono = i64;
-/// Point in time on monotonic timeline (hardware ticks).
+/// Monotonic time point (ticks).
 pub type ZxInstantMonoTicks = i64;
-/// Duration on monotonic timeline (nanoseconds).
+/// Monotonic duration (ns).
 pub type ZxDurationMono = i64;
-/// Duration on monotonic timeline (hardware ticks).
+/// Monotonic duration (ticks).
 pub type ZxDurationMonoTicks = i64;
 
-/// Point in time on boot timeline (nanoseconds).
+/// Boot time point (ns).
 pub type ZxInstantBoot = i64;
-/// Point in time on boot timeline (hardware ticks).
+/// Boot time point (ticks).
 pub type ZxInstantBootTicks = i64;
-/// Duration on boot timeline (nanoseconds).
+/// Boot duration (ns).
 pub type ZxDurationBoot = i64;
-/// Duration on boot timeline (hardware ticks).
+/// Boot duration (ticks).
 pub type ZxDurationBootTicks = i64;
 
-// Polymorphic types (ambiguous timeline)
+// Polymorphic types
 
-/// Point in time (nanoseconds).
+/// Time point (ns).
 pub type ZxTime = i64;
-/// Quantity of time (nanoseconds).
+/// Duration (ns).
 pub type ZxDuration = i64;
 /// Time in hardware ticks.
 pub type ZxTicks = i64;
@@ -42,7 +39,7 @@ pub const ZX_TIME_INFINITE_PAST: i64 = i64::MIN;
 
 // Overflow-safe arithmetic
 
-/// Add duration to time, saturating on overflow.
+/// Saturating time + duration.
 pub const fn zx_time_add_duration(time: ZxTime, duration: ZxDuration) -> ZxTime {
     match time.checked_add(duration) {
         Some(x) => x,
@@ -56,7 +53,7 @@ pub const fn zx_time_add_duration(time: ZxTime, duration: ZxDuration) -> ZxTime 
     }
 }
 
-/// Subtract duration from time, saturating on overflow.
+/// Saturating time − duration.
 pub const fn zx_time_sub_duration(time: ZxTime, duration: ZxDuration) -> ZxTime {
     match time.checked_sub(duration) {
         Some(x) => x,
@@ -70,7 +67,7 @@ pub const fn zx_time_sub_duration(time: ZxTime, duration: ZxDuration) -> ZxTime 
     }
 }
 
-/// Subtract two times to get a duration, saturating on overflow.
+/// Saturating time − time → duration.
 pub const fn zx_time_sub_time(time1: ZxTime, time2: ZxTime) -> ZxDuration {
     match time1.checked_sub(time2) {
         Some(x) => x,
@@ -84,17 +81,17 @@ pub const fn zx_time_sub_time(time1: ZxTime, time2: ZxTime) -> ZxDuration {
     }
 }
 
-/// Add two durations, saturating on overflow.
+/// Saturating duration + duration.
 pub const fn zx_duration_add_duration(dur1: ZxDuration, dur2: ZxDuration) -> ZxDuration {
     dur1.saturating_add(dur2)
 }
 
-/// Subtract two durations, saturating on overflow.
+/// Saturating duration − duration.
 pub const fn zx_duration_sub_duration(dur1: ZxDuration, dur2: ZxDuration) -> ZxDuration {
     dur1.saturating_sub(dur2)
 }
 
-/// Multiply duration by int64, saturating on overflow.
+/// Saturating duration × i64.
 pub const fn zx_duration_mul_int64(duration: ZxDuration, multiplier: i64) -> ZxDuration {
     match duration.checked_mul(multiplier) {
         Some(x) => x,
@@ -108,12 +105,11 @@ pub const fn zx_duration_mul_int64(duration: ZxDuration, multiplier: i64) -> ZxD
     }
 }
 
-/// Extract nanoseconds from a duration (identity).
 pub const fn zx_nsec_from_duration(n: ZxDuration) -> i64 {
     n
 }
 
-// Unit conversions
+// Conversions
 
 pub const fn zx_duration_from_nsec(n: i64) -> ZxDuration {
     zx_duration_mul_int64(1, n)
@@ -139,7 +135,7 @@ pub const fn zx_duration_from_hour(n: i64) -> ZxDuration {
     zx_duration_mul_int64(3_600_000_000_000, n)
 }
 
-// Tick arithmetic
+// Tick ops
 
 pub const fn zx_ticks_add_ticks(ticks1: ZxTicks, ticks2: ZxTicks) -> ZxTicks {
     ticks1.saturating_add(ticks2)
@@ -162,7 +158,7 @@ pub const fn zx_ticks_mul_int64(ticks: ZxTicks, multiplier: i64) -> ZxTicks {
     }
 }
 
-// Convenience macros (as const fns)
+// Convenience wrappers
 
 pub const fn zx_nsec(n: i64) -> ZxDuration {
     zx_duration_from_nsec(n)

@@ -1,14 +1,14 @@
-// x86 feature detection and microarchitecture configuration.
-// Translated from zircon/kernel/arch/x86/include/arch/x86/feature.h
+// x86 feature detection and µarch config.
+// Derived from Zircon feature.h
 
 use crate::variables::idle_states::{X86IdleStatesConfig, X86_MAX_CSTATES};
 
-// Constants
+// Limits
 pub const MAX_SUPPORTED_CPUID: u32 = 0x17;
 pub const MAX_SUPPORTED_CPUID_HYP: u32 = 0x40000001;
 pub const MAX_SUPPORTED_CPUID_EXT: u32 = 0x80000021;
 
-// CPUID structures
+// CPUID leaf enum.
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CpuidLeaf {
@@ -18,7 +18,7 @@ pub struct CpuidLeaf {
     pub d: u32,
 }
 
-/// CPUID leaf numbers.
+/// CPUID leaf number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum X86CpuidLeafNum {
@@ -44,7 +44,7 @@ pub enum X86CpuidLeafNum {
     AmdTopology = 0x8000001e,
 }
 
-/// A reference to a specific bit in a CPUID leaf.
+/// Reference to a specific bit in a CPUID leaf.
 #[derive(Debug, Clone, Copy)]
 pub struct X86CpuidBit {
     pub leaf: X86CpuidLeafNum,
@@ -56,7 +56,7 @@ pub const fn cpuid_bit(leaf: X86CpuidLeafNum, word: u8, bit: u8) -> X86CpuidBit 
     X86CpuidBit { leaf, word, bit }
 }
 
-// CPU vendors
+// Vendors
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum X86Vendor {
@@ -76,13 +76,13 @@ pub enum X86Microarch {
     IntelIvyBridge,
     IntelBroadwell,
     IntelHaswell,
-    /// Skylake, Kaby Lake, Coffee Lake, etc.
+    /// Skylake, KBL, CFL, etc.
     IntelSkylake,
     IntelCannonlake,
     IntelIcelake,
     IntelTigerlake,
     IntelAlderlake,
-    /// Silvermont, Airmont
+    /// Silvermont / Airmont
     IntelSilvermont,
     /// Goldmont
     IntelGoldmont,
@@ -114,20 +114,20 @@ pub struct X86ModelInfo {
     pub patch_level: u32,
 }
 
-// Function pointer types
+// Fn pointer types
 
-/// Returns 0 if unknown, otherwise value in Hz.
+/// Timer frequency getter (0 if unknown).
 pub type X86GetTimerFreqFunc = fn() -> u64;
 
-/// Attempt to reboot the system; may fail and simply return.
+/// Reboot (may return on failure).
 pub type X86RebootSystemFunc = fn();
 
-/// Attempt to set a reason flag and reboot the system; may fail and simply return.
+/// Set reason flag and reboot.
 pub type X86RebootReasonFunc = fn(u64);
 
-// Microarchitecture configuration
+// µarch config
 
-/// Structure for supporting per-microarchitecture kernel configuration.
+/// Per-µarch kernel configuration.
 pub struct X86MicroarchConfig {
     pub microarch: X86Microarch,
     pub get_apic_freq: X86GetTimerFreqFunc,
@@ -135,16 +135,16 @@ pub struct X86MicroarchConfig {
     pub reboot_system: X86RebootSystemFunc,
     pub reboot_reason: X86RebootReasonFunc,
     pub disable_c1e: bool,
-    /// Whether the idle loop should prefer HLT to MWAIT.
+    /// Prefer HLT over MWAIT in idle loop.
     pub idle_prefer_hlt: bool,
     pub idle_states: X86IdleStatesConfig,
 }
 
-// Pre-computed feature flags
+// Feature flags
 
 pub static mut G_X86_FEATURE_FSGSBASE: bool = false;
 pub static mut G_X86_FEATURE_INVPCID: bool = false;
-/// Both PCID & INVLPCID present and enabled by kernel cmdline.
+/// PCID + INVPCID enabled by cmdline.
 pub static mut G_X86_FEATURE_PCID_ENABLED: bool = false;
 pub static mut G_X86_FEATURE_HAS_SMAP: bool = false;
 
@@ -282,7 +282,7 @@ pub fn x86_cpu_has_meltdown() -> bool {
     unsafe { G_HAS_MELTDOWN }
 }
 
-// Feature bit constants (CPUID leaf, register word, bit)
+// Feature bit constants (leaf, word, bit)
 
 pub const X86_FEATURE_SSE3: X86CpuidBit = cpuid_bit(X86CpuidLeafNum::ModelFeatures, 2, 0);
 pub const X86_FEATURE_MON: X86CpuidBit = cpuid_bit(X86CpuidLeafNum::ModelFeatures, 2, 3);

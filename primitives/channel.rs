@@ -31,8 +31,9 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         recv_pos: AtomicUsize::new(0),
         len: AtomicUsize::new(0),
         closed: AtomicBool::new(false),
+        refcount: AtomicUsize::new(2), // one for Sender, one for Receiver
     };
-    let inner_ptr = Box::leak(Box::new(inner)) as *const _;
+    let inner_ptr = Box::into_raw(Box::new(inner));
 
     (
         Sender { inner: inner_ptr },
@@ -49,6 +50,9 @@ struct ChannelInner<T> {
     recv_pos: AtomicUsize,
     len: AtomicUsize,
     closed: AtomicBool,
+    /// Reference count. Sender and Receiver each hold a reference.
+    /// When it drops to zero, the allocation is freed.
+    refcount: AtomicUsize,
 }
 
 // SAFETY: channel provides its own synchronization via atomics and wait queues.
@@ -108,7 +112,7 @@ impl<T> Drop for VecSlot<T> {
 
 /// The sending half of a channel. Can be cloned (multi-producer).
 pub struct Sender<T> {
-    inner: *const ChannelInner<T>,
+    inner: *mut ChannelInner<T>,
 }
 
 impl<T: Send> Sender<T> {
@@ -157,13 +161,21 @@ impl<T: Send> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
+        unsafe { (*self.inner).refcount.fetch_add(1, Ordering::Relaxed); }
         Sender { inner: self.inner }
     }
 }
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        // TODO: track sender count, close only when last sender drops.
+        unsafe {
+            let inner = &*self.inner;
+            inner.closed.store(true, Ordering::Release);
+            inner.recv_waiters.wake_all();
+            if inner.refcount.fetch_sub(1, Ordering::Release) == 1 {
+                drop(Box::from_raw(self.inner));
+            }
+        }
     }
 }
 
@@ -241,7 +253,7 @@ impl<'a, T> Drop for SendFuture<'a, T> {
 
 /// The receiving half of a channel. Single-consumer.
 pub struct Receiver<T> {
-    inner: *const ChannelInner<T>,
+    inner: *mut ChannelInner<T>,
 }
 
 impl<T: Send> Receiver<T> {
@@ -283,6 +295,17 @@ impl<T: Send> Receiver<T> {
         inner.send_waiters.wake_one();
 
         Ok(value)
+    }
+}
+
+impl<T> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        unsafe {
+            let inner = &*self.inner;
+            if inner.refcount.fetch_sub(1, Ordering::Release) == 1 {
+                drop(Box::from_raw(self.inner));
+            }
+        }
     }
 }
 

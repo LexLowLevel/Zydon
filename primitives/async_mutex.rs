@@ -1,8 +1,5 @@
 // Async mutex with priority inheritance.
-//
-// Never blocks synchronously. lock() returns a future that parks
-// the task until the holder releases. PI prevents unbounded
-// priority inversion.
+// lock() returns a future; PI prevents unbounded priority inversion.
 
 use core::cell::UnsafeCell;
 use core::future::Future;
@@ -17,7 +14,7 @@ const UNLOCKED: u32 = 0;
 const LOCKED_NO_WAITERS: u32 = 1;
 const LOCKED_HAS_WAITERS: u32 = 2;
 
-/// Async mutex with priority inheritance. Guard releases on drop.
+/// Async mutex with PI.
 pub struct AsyncMutex<T> {
     state: AtomicU32,
     waiters: WaitQueue,
@@ -65,8 +62,7 @@ impl<T> AsyncMutex<T> {
         }
     }
 
-    /// Acquire the lock, returning a future that completes when the lock
-    /// is held.
+    /// Acquire, returning a future that completes when held.
     pub fn lock(&self) -> MutexLockFuture<'_, T> {
         MutexLockFuture {
             mutex: self,
@@ -75,9 +71,7 @@ impl<T> AsyncMutex<T> {
         }
     }
 
-    /// Try to acquire the lock without waiting.
-    ///
-    /// Returns `Some(guard)` if the lock was free, `None` otherwise.
+    /// Try to acquire without waiting.
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         let prev = self.state.compare_exchange(
             UNLOCKED,
@@ -97,18 +91,16 @@ impl<T> AsyncMutex<T> {
         self.holder_priority.store(0, Ordering::Relaxed);
 
         if self.waiters.is_empty() {
-            // Fast path: no waiters.
             let prev = self.state.swap(UNLOCKED, Ordering::Release);
             debug_assert_ne!(prev, UNLOCKED, "unlock of unlocked mutex");
         } else {
-            // Has waiters. Transition to UNLOCKED and wake one.
             self.state.store(UNLOCKED, Ordering::Release);
             self.waiters.wake_one();
         }
     }
 
     fn apply_priority_inheritance(&self, waiter_priority: i32) {
-        // Boost holder's effective priority to at least waiter_priority.
+        // Boost holder's effective priority.
         loop {
             let current = self.holder_priority.load(Ordering::Relaxed);
             if current >= waiter_priority {
@@ -139,7 +131,7 @@ impl<'a, T> Future for MutexLockFuture<'a, T> {
     type Output = MutexGuard<'a, T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Fast path: try to grab it immediately.
+        // Fast path.
         let prev = self.mutex.state.compare_exchange(
             UNLOCKED,
             LOCKED_NO_WAITERS,
@@ -150,12 +142,11 @@ impl<'a, T> Future for MutexLockFuture<'a, T> {
             return Poll::Ready(MutexGuard { mutex: self.mutex });
         }
 
-        // Slow path: register on the wait queue and park.
+        // Slow path: register on wait queue.
         if !self.registered {
             self.wait_node.set_waker(cx.waker().clone());
             self.wait_node.set_priority(0); // TODO: get from TCB
 
-            // Mark that there are waiters.
             self.mutex
                 .state
                 .store(LOCKED_HAS_WAITERS, Ordering::Relaxed);
@@ -166,7 +157,7 @@ impl<'a, T> Future for MutexLockFuture<'a, T> {
             }
             self.registered = true;
 
-            // Apply PI: boost the holder's priority.
+            // Apply PI.
             self.mutex.apply_priority_inheritance(self.wait_node.priority());
         }
 

@@ -235,6 +235,11 @@ impl WaitQueue {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Returns true if the queue has waiters.
+    pub fn has_waiters(&self) -> bool {
+        self.len() > 0
+    }
 }
 
 // Small inline Vec for wake_all (can't allocate in kernel).
@@ -248,8 +253,9 @@ mod heapless {
     impl<T, const N: usize> Vec<T, N> {
         pub const fn new() -> Self {
             Self {
-                // SAFETY: MaybeUninit does not require initialization.
-                buf: unsafe { core::mem::MaybeUninit::uninit().assume_init() },
+                // SAFETY: [MaybeUninit<T>; N] does not require initialization.
+                // Using a const block avoids the unsound MaybeUninit::uninit().assume_init() pattern.
+                buf: [const { MaybeUninit::uninit() }; N],
                 len: 0,
             }
         }

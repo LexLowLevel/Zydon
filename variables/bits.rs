@@ -10,29 +10,29 @@ pub fn ctz(x: u32) -> u32 {
     x.trailing_zeros()
 }
 
-/// Extract a single bit at position `bit` from `x`.
+/// Extract single bit at position.
 pub const fn bit(x: u32, bit: u32) -> u32 {
     x & (1 << bit)
 }
 
-/// Test if bit `bit` is set in `x`, returning 0 or 1.
+/// Test bit, returning 0 or 1.
 pub const fn bit_shift(x: u32, bit: u32) -> u32 {
     (x >> bit) & 1
 }
 
-/// Extract bits [high:low] (inclusive) from `x` without shifting.
+/// Extract bits [high:low] without shifting.
 pub const fn bits(x: u32, high: u32, low: u32) -> u32 {
     let mask = ((1u32 << (high + 1)) - 1) & !((1u32 << low) - 1);
     x & mask
 }
 
-/// Extract bits [high:low] (inclusive) from `x`, shifted down to LSB.
+/// Extract bits [high:low], shifted to LSB.
 pub const fn bits_shift(x: u32, high: u32, low: u32) -> u32 {
     let mask = (1u32 << (high - low + 1)) - 1;
     (x >> low) & mask
 }
 
-/// Test if bit `bit` is set in `x`, returning 1 if set, 0 otherwise.
+/// Test bit, returning 1 if set.
 pub const fn bit_set(x: u32, bit: u32) -> u32 {
     if (x & (1 << bit)) != 0 { 1 } else { 0 }
 }
@@ -118,7 +118,7 @@ pub const fn bit_mask32(x: u32) -> u32 {
 
 // --- Bitmap operations ---
 
-/// Set `nr` bits starting from `start` in `bitmap`.
+/// Set `nr` bits from `start`.
 pub fn bitmap_set(bitmap: &mut [usize], start: usize, nr: usize) {
     let mut p = bitmap_word(start);
     let size = start + nr;
@@ -138,7 +138,7 @@ pub fn bitmap_set(bitmap: &mut [usize], start: usize, nr: usize) {
     }
 }
 
-/// Clear `nr` bits starting from `start` in `bitmap`.
+/// Clear `nr` bits from `start`.
 pub fn bitmap_clear(bitmap: &mut [usize], start: usize, nr: usize) {
     let mut p = bitmap_word(start);
     let size = start + nr;
@@ -158,18 +158,18 @@ pub fn bitmap_clear(bitmap: &mut [usize], start: usize, nr: usize) {
     }
 }
 
-/// Test if bit `bit` is set in `bitmap`.
+/// Test bit in bitmap.
 pub fn bitmap_test(bitmap: &[usize], bit: usize) -> bool {
     (bitmap[bitmap_word(bit)] & (1usize << bitmap_bit_in_word(bit))) != 0
 }
 
-/// Find first zero bit starting from LSB.
+/// Find first zero bit from LSB.
 pub fn ffz(x: usize) -> usize {
     (!x).trailing_zeros() as usize
 }
 
-/// Find first zero bit in `bitmap` with `numbits` total bits.
-/// Returns the bit index, or None if all bits are set.
+/// Find first zero bit in bitmap.
+/// Returns bit index or None.
 pub fn bitmap_ffz(bitmap: &[usize], numbits: usize) -> Option<usize> {
     for i in 0..bitmap_num_words(numbits) {
         if bitmap[i] == !0usize {

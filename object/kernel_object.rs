@@ -1,9 +1,5 @@
 // Kernel object model.
-//
-// Every kernel entity (tasks, channels, VMOs, etc.) is a kernel object.
-// Objects are reference-counted and accessed through handles.
-// Refcounting is intrusive (lives in the object header) to avoid
-// extra indirection.
+// Reference-counted, accessed through handles. Intrusive refcount in header.
 
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -26,7 +22,6 @@ pub const TYPE_THREAD: ObjectTypeId = ObjectTypeId(8);
 pub const TYPE_HANDLE_TABLE: ObjectTypeId = ObjectTypeId(9);
 
 /// Header embedded at the start of every kernel object.
-/// Allows ContainerOf-style pointer arithmetic to recover the containing object.
 pub struct ObjectHeader {
     refcount: AtomicU32,  // starts at 1
     type_id: ObjectTypeId,
@@ -44,14 +39,14 @@ impl ObjectHeader {
         }
     }
 
-    /// Increment refcount. SAFETY: must correspond to a valid reference.
+    /// Increment refcount.
     pub fn add_ref(&self) {
         let old = self.refcount.fetch_add(1, Ordering::Relaxed);
         debug_assert!(old > 0, "add_ref on destroyed object");
         debug_assert!(old < u32::MAX - 1, "reference count overflow");
     }
 
-    /// Decrement refcount. Returns previous count. If 1, caller must destroy.
+    /// Decrement refcount. If returns 1, caller must destroy.
     pub fn release(&self) -> u32 {
         let old = self.refcount.fetch_sub(1, Ordering::Release);
         debug_assert!(old > 0, "release on already-destroyed object");
@@ -84,7 +79,7 @@ impl ObjectHeader {
     }
 }
 
-/// Trait for kernel objects. Provides downcasting, lifecycle callbacks, signals.
+/// Trait for kernel objects.
 pub trait KernelObject: Any + Send + Sync {
     fn header(&self) -> &ObjectHeader;
 
@@ -101,9 +96,8 @@ pub trait KernelObject: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// Intrusive ref-counted pointer to a kernel object.
-/// Handles contain a KoRef internally.
-/// SAFETY: raw pointer with manual refcounting, caller must ensure validity.
+/// Ref-counted pointer to a kernel object.
+/// SAFETY: raw pointer with manual refcounting.
 pub struct KoRef {
     ptr: *const dyn KernelObject,
 }
@@ -113,7 +107,7 @@ unsafe impl Send for KoRef {}
 unsafe impl Sync for KoRef {}
 
 impl KoRef {
-    /// Create a KoRef from a reference, incrementing the refcount.
+    /// Create a KoRef, incrementing the refcount.
     pub fn new(obj: &dyn KernelObject) -> Self {
         obj.header().add_ref();
         Self { ptr: obj as *const dyn KernelObject }
@@ -148,7 +142,6 @@ impl Drop for KoRef {
     fn drop(&mut self) {
         let old = self.header().release();
         if old == 1 {
-            // Last reference, call destroy callback.
             self.get().on_destroy();
         }
     }

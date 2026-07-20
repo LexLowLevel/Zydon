@@ -1,8 +1,7 @@
 // Task control block (TCB).
 //
-// Hot fields are packed into the first cache line for the poll loop.
-// WaitNode and CpuContext are embedded to avoid heap allocations on
-// park/context-switch.
+// Hot fields occupy the first cache line for the poll loop.
+// WaitNode and CpuContext are inline to avoid heap allocations.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -14,11 +13,10 @@ use crate::task::task_id::TaskId;
 use crate::task::task_state::{AtomicTaskState, TaskState};
 use crate::primitives::wait_queue::WaitNode;
 
-/// Size of the kernel stack per task, in bytes.
+/// Kernel stack size per task (bytes).
 pub const KERNEL_STACK_SIZE: usize = 8192;
 
-/// Architecture-specific saved CPU context (registers, FPU state, etc.).
-/// Actual layout is defined in arch/contextswi.s.
+/// Saved CPU context (arch-specific, see arch/contextswi.s).
 #[repr(C, align(16))]
 pub struct CpuContext {
     regs: [u8; 512], // opaque register save area
@@ -30,10 +28,10 @@ impl CpuContext {
     }
 }
 
-/// Core affinity mask. Bit N set means the task may run on core N.
+/// Core affinity mask (bit N = may run on core N).
 pub type AffinityMask = u64;
 
-/// The task control block. Hot fields first for cache locality.
+/// Task control block. Hot fields first for cache locality.
 #[repr(C)]
 pub struct TaskControlBlock {
     // ── hot cache line ──
@@ -45,28 +43,28 @@ pub struct TaskControlBlock {
     pub affinity: AtomicU64,
 
     // ── cold fields ──
-    /// The async body. SAFETY: executor has exclusive access during poll.
+    /// Async body. SAFETY: executor has exclusive access during poll.
     future: UnsafeCell<Pin<Box<dyn Future<Output = ()> + Send>>>,
     waker: UnsafeCell<Option<Waker>>,
     pub wait_node: UnsafeCell<WaitNode>,
     pub saved_context: CpuContext,
     pub kernel_stack: *mut u8,
-    pub current_core: AtomicU32, // u32::MAX if not running
+    pub current_core: AtomicU32, // u32::MAX = not running
     pub decay_counter: AtomicU32,
     pub user_tid: u64,
-    /// Intrusive linked-list pointer for the run queue. Access only under the
-    /// owning LevelQueue's spinlock.
+    /// Intrusive run queue link. Access only under owning LevelQueue's lock.
     pub run_queue_next: UnsafeCell<*const TaskControlBlock>,
+    /// Waker refcount. Ensures TCB outlives any Waker pointing to it.
+    waker_refcount: AtomicU32,
 }
 
-// SAFETY: future is Send, mutable access is through UnsafeCell with
-// state machine enforcement, WaitNode is only accessed by owner or
-// under WaitQueue's spinlock.
+// SAFETY: future is Send; mutable access via UnsafeCell enforced by
+// state machine; WaitNode accessed only by owner or under WaitQueue lock.
 unsafe impl Send for TaskControlBlock {}
 unsafe impl Sync for TaskControlBlock {}
 
 impl TaskControlBlock {
-    /// Create a new TCB. Starts in Created state, all-core affinity.
+    /// New TCB. Created state, all-core affinity.
     pub fn new<F>(id: TaskId, future: F) -> Self
     where
         F: Future<Output = ()> + Send + 'static,
@@ -87,54 +85,55 @@ impl TaskControlBlock {
             decay_counter: AtomicU32::new(0),
             user_tid: 0,
             run_queue_next: UnsafeCell::new(core::ptr::null()),
+            waker_refcount: AtomicU32::new(0),
         }
     }
 
-    /// Get mutable ref to the future for polling.
-    /// SAFETY: caller must be the executor on the owning core, task must be RUNNING.
+    /// Mutable ref to future for polling.
+    /// SAFETY: caller must be owning-core executor, task must be RUNNING.
     pub unsafe fn future_mut(&self) -> Pin<&mut (dyn Future<Output = ()> + Send)> {
         (*self.future.get()).as_mut()
     }
 
-    /// Set the waker. SAFETY: only call from executor before poll.
+    /// Set waker. SAFETY: only from executor before poll.
     pub unsafe fn set_waker(&self, waker: Waker) {
         *self.waker.get() = Some(waker);
     }
 
-    /// Get mutable ref to the embedded wait node.
-    /// SAFETY: caller must ensure the node isn't concurrently linked.
+    /// Mutable ref to embedded wait node.
+    /// SAFETY: caller must ensure node isn't concurrently linked.
     pub unsafe fn wait_node_mut(&self) -> &mut WaitNode {
         &mut *self.wait_node.get()
     }
 
-    /// Transition to READY and enqueue. Called by the waker.
-    /// No-op if already READY or RUNNING (spurious wake is safe).
+    /// Transition to READY and enqueue (called by waker).
+    /// No-op if already READY or RUNNING.
     pub fn wake(&self) {
         loop {
             let current = self.state.get();
             match current {
                 TaskState::Blocked => {
                     if self.state.transition(TaskState::Blocked, TaskState::Ready).is_ok() {
-                        // Executor will pick this up on its next poll.
+                        // Executor picks this up on next poll.
                         return;
                     }
                     // CAS failed; retry.
                 }
                 TaskState::Created => {
-                    // Created but never run, transition to Ready.
+                    // Created→Ready (never scheduled).
                     if self.state.transition(TaskState::Created, TaskState::Ready).is_ok() {
                         return;
                     }
                 }
                 _ => {
-                    // Already Ready, Running, Dying, or Dead. No-op.
+                    // Already Ready/Running/Dying/Dead. No-op.
                     return;
                 }
             }
         }
     }
 
-    /// Set base priority. Also updates effective if no PI boost is active.
+    /// Set base priority (updates effective if no PI boost active).
     pub fn set_priority(&self, priority: i32) {
         self.base_priority.store(priority, Ordering::Relaxed);
         let effective = self.effective_priority.load(Ordering::Relaxed);
@@ -143,7 +142,7 @@ impl TaskControlBlock {
         }
     }
 
-    /// Apply a PI boost.
+    /// Apply priority inheritance boost.
     pub fn boost_priority(&self, boost_to: i32) {
         loop {
             let current = self.effective_priority.load(Ordering::Relaxed);
@@ -168,18 +167,20 @@ impl TaskControlBlock {
         self.effective_priority.store(base, Ordering::Relaxed);
     }
 
-    /// Reset the quantum for a new scheduling period.
+    /// Reset quantum for a new scheduling period.
     pub fn reset_quantum(&self, quantum: i32) {
         self.quantum_remaining.store(quantum, Ordering::Relaxed);
     }
 
-    /// Consume one tick of the quantum. Returns the remaining ticks.
+    /// Consume one tick. Returns remaining ticks.
+    #[inline]
     pub fn consume_tick(&self) -> i32 {
         let prev = self.quantum_remaining.fetch_sub(1, Ordering::Relaxed);
         prev - 1
     }
 
-    /// Returns true if the task is eligible to run on `core_id`.
+    /// Eligible to run on `core_id`?
+    #[inline]
     pub fn can_run_on(&self, core_id: u32) -> bool {
         let mask = self.affinity.load(Ordering::Relaxed);
         (mask & (1u64 << core_id)) != 0

@@ -1,49 +1,48 @@
 // Task identifier.
 //
-// 64-bit value: upper 32 bits = generation, lower 32 bits = slot index.
-// The generation prevents ABA problems when slots are reused.
+// 64-bit: upper 32 = generation (ABA prevention), lower 32 = slot index.
 
 use core::fmt;
 
-/// A globally unique task identifier.
+    /// Globally unique task identifier.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TaskId(u64);
 
 impl TaskId {
-    /// The kernel idle task always has TaskId(0).
+    /// Kernel idle task (TaskId(0)).
     pub const IDLE: TaskId = TaskId(0);
 
-    /// Create a new TaskId from a raw u64.
+    /// From raw u64.
     pub const fn from_raw(raw: u64) -> Self {
         TaskId(raw)
     }
 
-    /// Create a new TaskId from an index and generation.
+    /// From slot index and generation.
     pub const fn new(index: u32, generation: u32) -> Self {
         TaskId(((generation as u64) << 32) | (index as u64))
     }
 
-    /// Return the raw u64 representation.
+    /// Raw u64.
     pub const fn raw(&self) -> u64 {
         self.0
     }
 
-    /// Return the slot index (lower 32 bits).
+    /// Slot index (lower 32 bits).
     pub const fn index(&self) -> u32 {
         (self.0 & 0xFFFF_FFFF) as u32
     }
 
-    /// Return the generation (upper 32 bits).
+    /// Generation (upper 32 bits).
     pub const fn generation(&self) -> u32 {
         (self.0 >> 32) as u32
     }
 
-    /// Return a new TaskId with the generation incremented by 1.
+    /// New TaskId with generation incremented.
     pub const fn next_generation(&self) -> TaskId {
         TaskId(self.0.wrapping_add(1u64 << 32))
     }
 
-    /// Return true if this is the idle task.
+    /// True if this is the idle task.
     pub const fn is_idle(&self) -> bool {
         self.0 == 0
     }
@@ -61,7 +60,7 @@ impl fmt::Display for TaskId {
     }
 }
 
-/// Atomic TaskId for use in lock-free data structures.
+    /// Atomic TaskId for lock-free structures.
 pub struct AtomicTaskId {
     inner: core::sync::atomic::AtomicU64,
 }

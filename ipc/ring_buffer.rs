@@ -1,12 +1,9 @@
-// Lock-free SPSC ring buffer for IPC messages.
+// Lock-free SPSC ring buffer for IPC.
 //
-// Producer and consumer each own their head/tail on separate cache lines
-// to avoid false sharing. Small messages are copied inline; large ones
-// use zero-copy VMO path with only a descriptor enqueued.
-//
-// Memory ordering:
-//   Producer: write data, Release head.
-//   Consumer: Acquire head, read data, Release tail.
+// Head/tail on separate cache lines (no false sharing).
+// Small messages inline; large ones use zero-copy VMO path.
+// Ordering: producer writes data then Releases head;
+// consumer Acquires head, reads data, Releases tail.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::cell::UnsafeCell;
@@ -14,7 +11,7 @@ use core::cell::UnsafeCell;
 use crate::primitives::cache_padded::CachePadded;
 use crate::ipc::message::Message;
 
-/// Lock-free SPSC ring buffer for IPC messages.
+/// Lock-free SPSC ring buffer for IPC.
 pub struct SpscRing {
     head: CachePadded<AtomicUsize>,  // next write slot (producer-only)
     tail: CachePadded<AtomicUsize>,  // next read slot (consumer-only)
@@ -27,10 +24,9 @@ struct RingBuffer {
     capacity: usize,
 }
 
-/// A single slot. `occupied` flag indicates whether it contains a message.
 struct Slot {
     occupied: AtomicUsize,
-    message: UnsafeCell<Option<Message>>,
+    message: UnsafeCell<Option<Message>>,  // valid iff occupied == 1
 }
 
 // SAFETY: SPSC - producer only writes head/message, consumer only writes tail.
@@ -39,7 +35,7 @@ unsafe impl Send for SpscRing {}
 unsafe impl Sync for SpscRing {}
 
 impl SpscRing {
-    /// Create a new ring with given capacity (must be power of 2).
+    /// Create ring with given power-of-2 capacity.
     pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0 && capacity.is_power_of_two(), "capacity must be a power of 2");
         let layout = core::alloc::Layout::array::<Slot>(capacity)
@@ -63,7 +59,7 @@ impl SpscRing {
         }
     }
 
-    /// Try to enqueue a message. Non-blocking, always lock-free.
+    /// Non-blocking enqueue. Err if full.
     pub fn try_send(&self, msg: Message) -> Result<(), TrySendError> {
         let head = self.head.load(Ordering::Relaxed);
         let tail = self.tail.load(Ordering::Acquire);
@@ -88,7 +84,7 @@ impl SpscRing {
         Ok(())
     }
 
-    /// Try to dequeue a message. Non-blocking, always lock-free.
+    /// Non-blocking dequeue. None if empty.
     pub fn try_recv(&self) -> Option<Message> {
         let tail = self.tail.load(Ordering::Relaxed);
         let head = self.head.load(Ordering::Acquire);
@@ -101,7 +97,7 @@ impl SpscRing {
         let buf = unsafe { &*self.buf.get() };
         let slot = unsafe { &*buf.slots.add(idx) };
 
-        // Wait for slot to be marked occupied (defense against reordering).
+        // Wait for occupied flag (defense against reordering).
         while slot.occupied.load(Ordering::Acquire) == 0 {
             core::hint::spin_loop();
         }
@@ -130,10 +126,8 @@ impl SpscRing {
 
 impl Drop for SpscRing {
     fn drop(&mut self) {
-        // Drain remaining messages.
+        // Drain remaining messages, then free slot array.
         while self.try_recv().is_some() {}
-
-        // Free the slot array.
         let layout = core::alloc::Layout::array::<Slot>(self.capacity)
             .expect("ring capacity");
         unsafe {

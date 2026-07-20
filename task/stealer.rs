@@ -1,20 +1,14 @@
-// Chase-Lev work-stealing deque.
+// Chase-Lev work-stealing deque [Chase & Lev, SPAA 2005].
 //
-// Each core owns a Worker (LIFO push/pop) and publishes a Stealer (FIFO).
-// When a core runs out of work, it steals half of another core's deque.
-//
-// Reference: Chase and Lev, "Dynamic Circular Work-Stealing Deque", SPAA 2005.
+// Owner (Worker) uses LIFO push/pop; thieves (Stealer) use FIFO steal.
+// When idle, a core steals half a victim's deque.
 
-use core::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
-use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 
-/// Minimum deque capacity (must be power of 2).
 const MIN_CAPACITY: usize = 64;
 
-/// Steal half the deque, per Cilk convention.
 const MAX_STEAL_BATCH: usize = 128;
 
-/// A work-stealing deque. Worker is the owner, Stealer is the thief.
 pub struct Worker<T: Copy> {
     inner: *mut DequeInner<T>,
 }
@@ -24,90 +18,73 @@ pub struct Stealer<T: Copy> {
 }
 
 struct DequeInner<T: Copy> {
-    bottom: AtomicIsize, // next push slot (worker-only)
-    top: AtomicIsize,    // oldest element (shared, CAS'd)
-    buffer: UnsafeCell<DequeBuffer<T>>,
+    bottom: AtomicIsize,
+    top: AtomicIsize,
+    buffer: AtomicPtr<DequeBuffer<T>>,
 }
 
 struct DequeBuffer<T: Copy> {
     data: *mut T,
-    log_cap: u32, // log2(capacity), for fast modulo
+    log_cap: u32,
     cap: usize,
 }
 
-// SAFETY: bottom is worker-only, top is CAS'd by all, buffer is written
-// at exclusively-owned indices.
 unsafe impl<T: Copy> Send for DequeInner<T> {}
 unsafe impl<T: Copy> Sync for DequeInner<T> {}
 
 impl<T: Copy> DequeBuffer<T> {
-    fn new(log_cap: u32) -> Self {
+    fn new(log_cap: u32) -> *mut Self {
         let cap = 1usize << log_cap;
         let layout = core::alloc::Layout::array::<T>(cap).expect("deque capacity overflow");
         let data = unsafe { alloc::alloc::alloc(layout) } as *mut T;
         assert!(!data.is_null(), "deque allocation failed");
-        Self { data, log_cap, cap }
+        Box::into_raw(Box::new(DequeBuffer { data, log_cap, cap }))
     }
 
     fn mask(&self) -> usize {
         self.cap - 1
     }
 
-    /// Read element at index `i` (mod capacity).
-    /// SAFETY: slot must have been written and not yet overwritten.
     unsafe fn get(&self, i: isize) -> T {
         *self.data.add(i as usize & self.mask())
     }
 
-    /// Write element at index `i` (mod capacity).
-    /// SAFETY: slot must be exclusively owned by the writer.
     unsafe fn put(&self, i: isize, val: T) {
         *self.data.add(i as usize & self.mask()) = val;
     }
 }
 
-impl<T: Copy> Drop for DequeBuffer<T> {
-    fn drop(&mut self) {
-        let layout = core::alloc::Layout::array::<T>(self.cap).expect("deque capacity");
-        unsafe {
-            alloc::alloc::dealloc(self.data as *mut u8, layout);
-        }
-    }
-}
-
-/// Create a new work-stealing deque. Returns (Worker, Stealer).
 pub fn deque<T: Copy>() -> (Worker<T>, Stealer<T>) {
-    let inner = Box::leak(Box::new(DequeInner {
+    let inner = Box::into_raw(Box::new(DequeInner {
         bottom: AtomicIsize::new(0),
         top: AtomicIsize::new(0),
-        buffer: UnsafeCell::new(DequeBuffer::new(MIN_CAPACITY.trailing_zeros())),
+        buffer: AtomicPtr::new(DequeBuffer::new(MIN_CAPACITY.trailing_zeros())),
     }));
     (Worker { inner }, Stealer { inner })
 }
 
 impl<T: Copy> Worker<T> {
-    /// Push to the bottom (LIFO end).
     pub fn push(&self, val: T) {
         let inner = unsafe { &*self.inner };
         let b = inner.bottom.load(Ordering::Relaxed);
         let t = inner.top.load(Ordering::Acquire);
-        let buf = unsafe { &*inner.buffer.get() };
+        let buf_ptr = inner.buffer.load(Ordering::Relaxed);
+        let buf = unsafe { &*buf_ptr };
 
         let size = b - t;
         if size >= buf.cap as isize {
-            self.grow(buf, t, b);
-            let buf = unsafe { &*inner.buffer.get() };
+            self.grow(buf_ptr, t, b);
+            let buf_ptr = inner.buffer.load(Ordering::Relaxed);
+            let buf = unsafe { &*buf_ptr };
             unsafe { buf.put(b, val) };
         } else {
             unsafe { buf.put(b, val) };
         }
 
-        // Ensure the buffer write is visible before updating bottom.
         core::sync::atomic::fence(Ordering::Release);
         inner.bottom.store(b + 1, Ordering::Relaxed);
     }
 
-    /// Pop from the bottom (LIFO end). Returns None if empty.
     pub fn pop(&self) -> Option<T> {
         let inner = unsafe { &*self.inner };
         let b = inner.bottom.load(Ordering::Relaxed) - 1;
@@ -117,10 +94,10 @@ impl<T: Copy> Worker<T> {
 
         let t = inner.top.load(Ordering::Relaxed);
         if t <= b {
-            let buf = unsafe { &*inner.buffer.get() };
+            let buf_ptr = inner.buffer.load(Ordering::Relaxed);
+            let buf = unsafe { &*buf_ptr };
             let val = unsafe { buf.get(b) };
             if t == b {
-                // Last element, compete with stealers via CAS.
                 match inner.top.compare_exchange(
                     t,
                     t + 1,
@@ -132,7 +109,6 @@ impl<T: Copy> Worker<T> {
                         Some(val)
                     }
                     Err(_) => {
-                        // A stealer got it first.
                         inner.bottom.store(b + 1, Ordering::Relaxed);
                         None
                     }
@@ -141,13 +117,11 @@ impl<T: Copy> Worker<T> {
                 Some(val)
             }
         } else {
-            // Deque was empty.
             inner.bottom.store(b + 1, Ordering::Relaxed);
             None
         }
     }
 
-    /// Approximate length.
     pub fn len(&self) -> usize {
         let inner = unsafe { &*self.inner };
         let b = inner.bottom.load(Ordering::Relaxed);
@@ -155,10 +129,12 @@ impl<T: Copy> Worker<T> {
         (b - t).max(0) as usize
     }
 
-    fn grow(&self, old_buf: &DequeBuffer<T>, t: isize, b: isize) {
+    fn grow(&self, old_buf_ptr: *mut DequeBuffer<T>, t: isize, b: isize) {
         let inner = unsafe { &*self.inner };
+        let old_buf = unsafe { &*old_buf_ptr };
         let new_log_cap = old_buf.log_cap + 1;
-        let new_buf = DequeBuffer::new(new_log_cap);
+        let new_buf_ptr = DequeBuffer::new(new_log_cap);
+        let new_buf = unsafe { &*new_buf_ptr };
 
         for i in t..b {
             unsafe {
@@ -167,27 +143,29 @@ impl<T: Copy> Worker<T> {
             }
         }
 
-        // Replace the buffer. Only the owner (Worker) grows it.
-        // SAFETY: No stealer reads during growth since we hold the only
-        // mutable reference via UnsafeCell.
-        unsafe {
-            *inner.buffer.get() = new_buf;
-        }
+        inner.buffer.store(new_buf_ptr, Ordering::Release);
     }
 }
 
 impl<T: Copy> Stealer<T> {
-    /// Steal one element from the top (FIFO end).
-    /// Returns None if empty or contention.
     pub fn steal(&self) -> Option<T> {
         let inner = unsafe { &*self.inner };
-        let t = inner.top.load(Ordering::Acquire);
-        core::sync::atomic::fence(Ordering::SeqCst);
-        let b = inner.bottom.load(Ordering::Acquire);
+        loop {
+            let buf_ptr = inner.buffer.load(Ordering::Acquire);
+            let buf = unsafe { &*buf_ptr };
+            let t = inner.top.load(Ordering::Acquire);
+            core::sync::atomic::fence(Ordering::SeqCst);
+            let b = inner.bottom.load(Ordering::Acquire);
 
-        if t < b {
-            let buf = unsafe { &*inner.buffer.get() };
+            if t >= b {
+                return None;
+            }
+
             let val = unsafe { buf.get(t) };
+
+            if inner.buffer.load(Ordering::Acquire) != buf_ptr {
+                continue;
+            }
 
             match inner.top.compare_exchange(
                 t,
@@ -195,47 +173,48 @@ impl<T: Copy> Stealer<T> {
                 Ordering::SeqCst,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => Some(val),
-                Err(_) => None, // contention, abort
+                Ok(_) => return Some(val),
+                Err(_) => return None,
             }
-        } else {
-            None
         }
     }
 
-    /// Steal up to `count` elements from the top. Returns how many were stolen.
     pub fn steal_batch(&self, out: &mut [T]) -> usize {
         let inner = unsafe { &*self.inner };
-        let t = inner.top.load(Ordering::Acquire);
-        core::sync::atomic::fence(Ordering::SeqCst);
-        let b = inner.bottom.load(Ordering::Acquire);
+        loop {
+            let buf_ptr = inner.buffer.load(Ordering::Acquire);
+            let buf = unsafe { &*buf_ptr };
+            let t = inner.top.load(Ordering::Acquire);
+            core::sync::atomic::fence(Ordering::SeqCst);
+            let b = inner.bottom.load(Ordering::Acquire);
 
-        let available = (b - t).max(0) as usize;
-        if available == 0 {
-            return 0;
-        }
+            let available = (b - t).max(0) as usize;
+            if available == 0 {
+                return 0;
+            }
 
-        let to_steal = available.min(out.len()).min(MAX_STEAL_BATCH);
-        let buf = unsafe { &*inner.buffer.get() };
+            let to_steal = available.min(out.len()).min(MAX_STEAL_BATCH);
 
-        // Read the elements.
-        for i in 0..to_steal {
-            out[i] = unsafe { buf.get(t + i as isize) };
-        }
+            for i in 0..to_steal {
+                out[i] = unsafe { buf.get(t + i as isize) };
+            }
 
-        // Advance the top pointer via CAS.
-        match inner.top.compare_exchange(
-            t,
-            t + to_steal as isize,
-            Ordering::SeqCst,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => to_steal,
-            Err(_) => 0, // contention, abort batch
+            if inner.buffer.load(Ordering::Acquire) != buf_ptr {
+                continue;
+            }
+
+            match inner.top.compare_exchange(
+                t,
+                t + to_steal as isize,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => to_steal,
+                Err(_) => 0,
+            }
         }
     }
 
-    /// Approximate number of elements available to steal.
     pub fn len(&self) -> usize {
         let inner = unsafe { &*self.inner };
         let t = inner.top.load(Ordering::Relaxed);
